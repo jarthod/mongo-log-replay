@@ -1,20 +1,34 @@
 #!/usr/bin/env ruby
+# https://github.com/jarthod/mongo-log-replay
+
+# Replay the mongo queries from the log file in STDIN to the server passed
+# in argument (default localhost)
+# careful to disable writes if used in production (writes = false)
+
+# usage: cat ruby-application.log | ./mongo-log-replay.rb mongodb://localhost
+
+dry_run = false
+reads = !dry_run
+writes = !dry_run
 
 require 'bundler/inline'
 gemfile do
   source 'https://rubygems.org'
-  gem 'mongo'
+  gem 'mongo', '2.4.3'
   gem 'concurrent-ruby'
 end
 
-stop = false
-trap('INT') { stop = true }
+# Little mongo performance optimisaion as we don't need the documents
+module BSON
+  class Document
+    def convert_value(value)
+      value#.to_bson_normalized_value
+    end
+  end
+end
 
-pool = Concurrent::FixedThreadPool.new(4, max_queue: 1000)
+pool = Concurrent::FixedThreadPool.new(8, max_queue: 1000)
 timings = Concurrent::Array.new
-dry_run = false
-reads = !dry_run
-writes = !dry_run
 
 class MongoMonitor
   def initialize timings; @timings = timings; end
@@ -22,10 +36,17 @@ class MongoMonitor
   def succeeded(event); @timings << event.duration * 1000; end
   def failed(event); succeeded(event); end
 end
+mongo_hostname = ARGV.first || 'localhost'
+mongo_db = 'benchmark'
+puts "Connecting to mongodb on #{mongo_hostname}/#{mongo_db}..."
 Mongo::Monitoring::Global.subscribe(Mongo::Monitoring::COMMAND, MongoMonitor.new(timings))
 Mongo::Logger.logger = Logger.new(STDOUT)
 Mongo::Logger.logger.level = Logger::Severity::ERROR
-mongo = Mongo::Client.new([ARGV.first || 'localhost'], database: 'mongo-log-replay', truncate_logs: false, connect: :direct, max_pool_size: 60)
+mongo = Mongo::Client.new([mongo_hostname], database: mongo_db, truncate_logs: false, connection: :direct, max_pool_size: 60)
+puts "Found #{mongo.database.collection_names.size} collections"
+
+stop = false
+trap('INT') { stop = true }
 
 lines = err = queries = counts = aggregates = updates = inserts = deletes = 0
 inserted_doc = Concurrent::Hash.new {|h, k| h[k] = Concurrent::Array.new}
@@ -93,23 +114,24 @@ STDIN.each_line do |line|
       rescue SyntaxError => e
         err += 1
       rescue => e
-        # p e
-        # puts e.backtrace.join("\n")
+        # puts e.inspect, e.backtrace.join("\n")
         err += 1
       end
     }
   end
   lines += 1
   print "\rparsed %8d lines (%3d err) : %7d queries, %6d counts, %5d aggregates, %5d inserts, %5d updates, %5d deletes — %s (queue: %3d)" % [lines, err, queries, counts, aggregates, inserts, updates, deletes, time, pool.queue_length] if lines % 10 == 0
-  break if stop #or lines >= 10_000
-  sleep 0.1 while pool.queue_length > 900
+  break if stop# or lines >= 1_000_000
+  sleep 0.1 while stop == false and pool.queue_length > 900
 end
 pool.shutdown
-while pool.queue_length > 0
+while stop == false and pool.queue_length > 0
   sleep 0.1
   print "\rparsed %8d lines (%3d err) : %7d queries, %6d counts, %5d aggregates, %5d inserts, %5d updates, %5d deletes — %s (queue: %3d)" % [lines, err, queries, counts, aggregates, inserts, updates, deletes, time, pool.queue_length]
 end
 pool.wait_for_termination
+
+# p missing_topologies unless missing_topologies.empty?
 
 clock_time = Time.now - start
 timings.sort!
@@ -133,20 +155,4 @@ inserted_doc.each do |col, docs|
   print "removing #{docs.count} documents inserted in #{col} →"
   res = mongo[col].delete_many(_id: {'$in' => docs}).first['n']
   puts " DONE: #{res} removed."
-end
-
-# p missing_topologies unless missing_topologies.empty?
-# [x] ["aggregate", "pipeline", "cursor"]
-# [x] ["count", "query"]
-# [x] ["count", "query", "hint"]
-# [x] ["getMore", "collection"]
-# [x] ["find", "filter"]
-# [x] ["find", "filter", "sort", "projection", "limit"]
-# [x] ["find", "filter", "sort", "limit", "projection"]
-# [x] ["update", "updates", "ordered"]
-# [x] ["findandmodify", "query", "update", "sort", "new", "bypassDocumentValidation"]
-# [x] ["insert", "documents", "ordered"]
-# [x] ["delete", "deletes", "ordered"]
-# [x] ["distinct", "key", "query"]
-# [x] ["group"]
-# [ ] ["listIndexes", "cursor"]
+end if writes

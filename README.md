@@ -55,6 +55,25 @@ Crystal:
 cat logfile | head -1000 | ./mongo-log-replay
 ```
 
+## Supported query topologies
+
+[x] `["aggregate", "pipeline", "cursor"]`
+[x] `["count", "query"]`
+[x] `["count", "query", "hint"]`
+[x] `["getMore", "collection"]`
+[x] `["find", "filter"]`
+[x] `["find", "filter", "sort", "projection", "limit"]`
+[x] `["find", "filter", "sort", "limit", "projection"]`
+[x] `["update", "updates", "ordered"]`
+[x] `["findandmodify", "query", "update", "sort", "new", "bypassDocumentValidation"]`
+[x] `["insert", "documents", "ordered"]`
+[x] `["delete", "deletes", "ordered"]`
+[x] `["distinct", "key", "query"]`
+[x] `["group"]`
+[ ] `["listIndexes", "cursor"]`
+
+All other topologies are not supported.
+
 ## Contributing
 
 1. Fork it (<https://github.com/jarthod/mongo-log-replay/fork>)
