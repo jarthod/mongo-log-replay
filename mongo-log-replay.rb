@@ -18,6 +18,9 @@ gemfile do
   gem 'concurrent-ruby'
 end
 
+# require 'mongo'
+# require 'concurrent-ruby'
+
 # Little mongo performance optimisaion as we don't need the documents
 module BSON
   class Document
@@ -36,14 +39,15 @@ class MongoMonitor
   def succeeded(event); @timings << event.duration * 1000; end
   def failed(event); succeeded(event); end
 end
-mongo_hostname = ARGV.first || 'localhost'
-mongo_db = 'benchmark'
-puts "Connecting to mongodb on #{mongo_hostname}/#{mongo_db}..."
+mongo_uri = ARGV.first || 'mongodb://localhost'
+database = 'benchmark'
+puts "[#{$$}] Connecting to mongodb on #{mongo_uri}..."
 Mongo::Monitoring::Global.subscribe(Mongo::Monitoring::COMMAND, MongoMonitor.new(timings))
 Mongo::Logger.logger = Logger.new(STDOUT)
 Mongo::Logger.logger.level = Logger::Severity::ERROR
-mongo = Mongo::Client.new([mongo_hostname], database: mongo_db, truncate_logs: false, connection: :direct, max_pool_size: 60)
-puts "Found #{mongo.database.collection_names.size} collections"
+mongo = Mongo::Client.new(mongo_uri, truncate_logs: false, connection: :direct, max_pool_size: 60)
+mongo = mongo.use(database)
+puts "[#{$$}] Found #{mongo.database.collection_names.size} collections in database #{database}"
 
 stop = false
 trap('INT') { stop = true }
@@ -120,14 +124,18 @@ STDIN.each_line do |line|
     }
   end
   lines += 1
-  print "\rparsed %8d lines (%3d err) : %7d queries, %6d counts, %5d aggregates, %5d inserts, %5d updates, %5d deletes — %s (queue: %3d)" % [lines, err, queries, counts, aggregates, inserts, updates, deletes, time, pool.queue_length] if lines % 10 == 0
+  if ENV['CLUSTER']
+    puts "[#{$$}] parsed %8d lines (%3d err) : %7d queries, %6d counts, %5d aggregates, %5d inserts, %5d updates, %5d deletes — %s (queue: %3d)" % [lines, err, queries, counts, aggregates, inserts, updates, deletes, time, pool.queue_length] if lines % 10000 == 0
+  else
+    print "\rparsed %8d lines (%3d err) : %7d queries, %6d counts, %5d aggregates, %5d inserts, %5d updates, %5d deletes — %s (queue: %3d)" % [lines, err, queries, counts, aggregates, inserts, updates, deletes, time, pool.queue_length] if lines % 10 == 0
+  end
   break if stop# or lines >= 1_000_000
   sleep 0.1 while stop == false and pool.queue_length > 900
 end
 pool.shutdown
 while stop == false and pool.queue_length > 0
   sleep 0.1
-  print "\rparsed %8d lines (%3d err) : %7d queries, %6d counts, %5d aggregates, %5d inserts, %5d updates, %5d deletes — %s (queue: %3d)" % [lines, err, queries, counts, aggregates, inserts, updates, deletes, time, pool.queue_length]
+  print "\rparsed %8d lines (%3d err) : %7d queries, %6d counts, %5d aggregates, %5d inserts, %5d updates, %5d deletes — %s (queue: %3d)" % [lines, err, queries, counts, aggregates, inserts, updates, deletes, time, pool.queue_length] unless ENV['CLUSTER']
 end
 pool.wait_for_termination
 
@@ -136,23 +144,27 @@ pool.wait_for_termination
 clock_time = Time.now - start
 timings.sort!
 
-puts
-puts "              clock time: %.3f sec" % (clock_time)
-puts "    total requests count: #{timings.size}"
-if timings.size > 0
-  puts " total requests duration: %.1f sec" % (timings.reduce(:+) / 1000)
-  mean = timings.reduce(:+) / timings.size
-  puts "  mean requests duration: %.1f ms" % mean
-  puts "median requests duration: %.1f ms" % timings[timings.size / 2]
-  puts " 90th%% requests duration: %.1f ms" % timings[(timings.size*0.9).floor]
-  puts " 99th%% requests duration: %.1f ms" % timings[(timings.size*0.99).floor]
-  stdev = Math.sqrt(timings.inject(0) {|acc, i| acc + (i-mean)**2 } / timings.size)
-  puts " stdev requests duration: %.1f ms" % stdev
-  puts "       requests / second: %.1f" % (timings.size / clock_time)
+if ENV['CLUSTER']
+  puts "[#{$$}] requests / second: %.1f" % (timings.size / clock_time)
+else
+  puts
+  puts "              clock time: %.3f sec" % (clock_time)
+  puts "    total requests count: #{timings.size}"
+  if timings.size > 0
+    puts " total requests duration: %.1f sec" % (timings.reduce(:+) / 1000)
+    mean = timings.reduce(:+) / timings.size
+    puts "  mean requests duration: %.1f ms" % mean
+    puts "median requests duration: %.1f ms" % timings[timings.size / 2]
+    puts " 90th%% requests duration: %.1f ms" % timings[(timings.size*0.9).floor]
+    puts " 99th%% requests duration: %.1f ms" % timings[(timings.size*0.99).floor]
+    stdev = Math.sqrt(timings.inject(0) {|acc, i| acc + (i-mean)**2 } / timings.size)
+    puts " stdev requests duration: %.1f ms" % stdev
+    puts "       requests / second: %.1f" % (timings.size / clock_time)
+  end
+  puts
+  inserted_doc.each do |col, docs|
+    print "removing #{docs.count} documents inserted in #{col} →"
+    res = mongo[col].delete_many(_id: {'$in' => docs}).first['n']
+    puts " DONE: #{res} removed."
+  end if writes
 end
-puts
-inserted_doc.each do |col, docs|
-  print "removing #{docs.count} documents inserted in #{col} →"
-  res = mongo[col].delete_many(_id: {'$in' => docs}).first['n']
-  puts " DONE: #{res} removed."
-end if writes
